@@ -2,13 +2,13 @@
 title: "trait-SDM_tutorial"
 ---
 
-# Trait-SDM: correlative modelling of multispecies occurrences with traits.
+# Trait-SDM: correlative modelling of multi-species occurrences with traits.
 
-This vignette introduces trait-Species Distribution Modelling. This is an approach to correlative modelling of multi-species datasets of occurrence (usually presence-absence in plots). But in theory the methods can be applied to abundances in plots or to presence-only data via appropriate likelihoods. in these models the species trait is a predictor, that you use to try to explain and predict distributions. This contrasts with the approach of treating the trait as a response to be modeled at a community level, AKA Community Weighted Means.
+This vignette introduces trait-Species Distribution Modelling. This is an approach to correlative modelling of multi-species datasets of occurrence (usually presence-absence in plots). But in theory the methods can be applied to abundances in plots or to presence-only data via appropriate likelihoods. In these models the species trait is a predictor, that you use to try to explain and predict distributions. This contrasts with the approach of treating the trait as a response to be modelled at a community level, AKA Community Weighted Means.
 
-We use multilevel models or hierarchical models or mixed effects models. The term multi-level model captures the conceptual approach that the species have linear models of response to environment. The parameters of those environmental response models which are modelled at a second, higher level, through species traits and extra variation.
+We use multi-level models or hierarchical models or mixed effects models. The term multi-level model captures the conceptual approach that the species have linear models of response to environment. The parameters of those environmental response models are modelled at a second, higher level, through species traits and extra variation. I assume you know the basics of multi-level modelling as implemented in lme4::glmer. Useful references are found at the end of this document. This is a work in progress, and the usual caveats apply.
 
-The document is sets out as rough guide to a workflow.
+The document is set out as rough guide to a workflow.
 
 1.  Prepare data from species traits and species occurrence datasets.
 
@@ -32,7 +32,9 @@ library(ggfortify, quietly = TRUE, warn.conflicts = FALSE)
 library(ggplot2, quietly = TRUE, warn.conflicts = FALSE)
 library(GGally, quietly = TRUE, warn.conflicts = FALSE)
 library(glmmTMB, quietly = TRUE, warn.conflicts = FALSE)
+library(lme4, quietly = TRUE, warn.conflicts = FALSE)
 library(performance, quietly = TRUE, warn.conflicts = FALSE)
+library(readxl, quietly = TRUE, warn.conflicts = FALSE)
 #library(patchwork, quietly = TRUE, warn.conflicts = FALSE)
 library(scales, quietly = TRUE, warn.conflicts = FALSE)
 library(sjPlot, quietly = TRUE, warn.conflicts = FALSE)
@@ -43,20 +45,39 @@ library(tidyr, quietly = TRUE, warn.conflicts = FALSE)
 
 ### Trait data
 
-Here we use Laura Pollock's PhD data on Eucalyptus trees in Gariwerd-Grampians. cite P
+Here we use Laura Pollock's PhD data on 20 taxa of *Eucalyptus* trees in Gariwerd-Grampians National Park, Victoria, Australia. If you use these data you must cite the DRYAD repo:
+
+#### Data from: The roles of ecological and evolutionary processes in plant community  assembly: the environment, hybridization and introgression influence co-occurrence of Eucalyptus
+
+#### Pollock, Laura J.; Bayly, Michael J.; Vesk, Peter A.
+
+Published Dec 19, 2014 on Dryad. https://doi.org/10.5061/dryad.27j37
+
+<https://datadryad.org/dataset/doi:10.5061/dryad.27j37>
+
+They are associated with this paper:
+
+Pollock, Laura J.; Bayly, Michael J.; Vesk, Peter A. (2015), The Roles of Ecological and Evolutionary Processes in Plant Community Assembly: The Environment, Hybridization, and Introgression Influence Co-occurrence of *Eucalyptus*, American Naturalist, 185: 784-796, <https://doi.org/10.1086/680983>
+
+However the appoach inthis document here, broadly reflect the work in Pollock et al. (2012)
+
+Pollock, L. J., Morris, W. K., & Vesk, P. A. (2012). The role of functional traits in species distributions revealed through a hierarchical model. *Ecography*, *35*(8), 716-725.
+
+Be aware that the data that I use here may not be exactly those that were used in the above paper.
 
 ```{r}
-library(readr)
-traits <- read_csv("grampians_traits.csv")
+traits <- read_excel("FinalEnviroTraitsForAmNat.xlsx", 
+    sheet = "Traits")
 View(traits)
 ```
 
 ### Occurrence data.
 
-These are presence-absence in plots centred on a tree. (so all plots have at least 1 tree)
+These are presence-absence in plots centred on a tree. (So all plots have at least 1 tree).
 
 ```{r}
-occ <- read_csv("grampians_plots.csv")
+occ <- read_excel("FinalEnviroTraitsForAmNat.xlsx", 
+    sheet = "enviro")
 head(occ)
 ```
 
@@ -101,6 +122,8 @@ ggpairs(traits, columns = 2:8)
 
 ok we might want to transform some e.g. medFtWt, etc.
 
+NB, which I haven't done!
+
 ```{r}
 traits_cor <- stats::cor(traits[-1])
 corrplot::corrplot(traits_cor, method = "ellipse", order = 'hclust')
@@ -110,7 +133,7 @@ Select a subset of traits that capture functions and are not too collinear.
 
 ```{r}
 traits %>%
-  select(TAXON, MedSeedWTmg, medSLA, StemDens, Maxht) -> traits.sel
+  select(TAXON, MedSeedSize, medSLA, StemDens, Maxht) -> traits.sel
 ggpairs(traits.sel, columns = 2:5) 
 ```
 
@@ -145,11 +168,11 @@ OK, we should be ready.
 
 ### No trait models
 
-in glmm.TMB, which is fast, and handles complex random effect structures btter than lmer. but
+in glmm.TMB, which is fast, and handles complex random effect structures better than lmer.
 
 #### M0 No Trait model, 4 envs, varying slopes
 
-note, here is
+in this we fit uncorrelated random effects. See Bates et al. (2015) and Matuschek et al. (2017) for a clear exposition of why this simpler approach is valid, compared to correlated random effects). NB see the double vertical bars (\|\|) in the random effects part of the model formula
 
 ```{r}
 start_time <- Sys.time()
@@ -162,7 +185,7 @@ end_time <- Sys.time()
 end_time - start_time
 ```
 
-Here just to demonstrate speed.
+Here just to demonstrate speed compared to lme4::glmer.
 
 ```{r}
 start_time <- Sys.time()
@@ -175,17 +198,19 @@ end_time <- Sys.time()
 end_time - start_time
 ```
 
+glmm.TMB is a factor of 5 faster. and it become more of an issu in more complex models.
+
 ```{r}
 summary(M0)
 #performance::model_performance(M0)
 ```
 
-note very little variation among species in Northness response. so let's drop it
+Note, very little variation among species in Northness response in the STD.DEV of the Random Effects. So let's drop it
 
 ```{r}
 start_time <- Sys.time()
 M0 =  glmmTMB(occur ~ 1  +  Rockiness + topowet +  PPTann + 
-                (1 +  Rockiness + topowet +  PPTann  | TAXON) #varying slopes & intercpt
+                (1 +  Rockiness + topowet +  PPTann  || TAXON) #varying slopes & intercpt
                 , 
                 family=binomial, data=trait_occ.l.scaled
                 ) 
@@ -193,6 +218,12 @@ M0 =  glmmTMB(occur ~ 1  +  Rockiness + topowet +  PPTann +
 end_time <- Sys.time()
 end_time - start_time
 ```
+
+you can compare the output of this model with one specifying correlated randome effect if you like, removing one vertical bar,so:
+
+(1 + Rockiness + topowet + PPTann \| TAXON)
+
+but here we proceed with uncorrelated varying slopes.
 
 #### M0.1 No Trait model, 3 envs uncorrelated varying slopes
 
@@ -213,7 +244,9 @@ summary(M0.1)
 
 So, uncorrelated RES improve BIC but worsen the AIC and the deviance. AIC favours more complex models, compared to BIC. I favour uncorrelated slopes. These are 3rd order parameters, we have no hypotheses for them (nor ways to understand them), they reduce power. Doug Bates has a couple of papers presenting this case.
 
-#### M0.2 No traits, quadratics environment, fixed width, correl RE
+#### M0.2 No traits, quadratics environment, fixed width, uncorrelated RE
+
+we might expect unimodal species occurrence responses to environmental gradients, so add quadratic terms.
 
 ```{r}
 start_time <- Sys.time()
@@ -233,9 +266,9 @@ end_time - start_time
 summary(M0.2)
 ```
 
-Tells us we need quadratic terms for Rockiness, topowetness, PPTann. Why? significant terms, and the between species SD for the linear effects of environement have increased, meaning there is more for the traits to explain.
+Tells us we need quadratic terms for Rockiness, topowetness, PPTann. How? Significant quadratic terms, and the between species SD for the linear effects of environment have increased, meaning there is more for the traits to explain.
 
-a quick check of residuals using the DHARMa package
+A quick check of residuals using the DHARMa package, thanks Florian Hartig.
 
 ```{r}
 simuloutput_0.1 <- simulateResiduals(M0.1)
@@ -260,11 +293,11 @@ M1 =  glmmTMB(occur ~ 1 +   Rockiness + topowet +  PPTann + #linear env
                 #unimodal quadratic env
                 I(Rockiness^2) + I(topowet^2) + I(PPTann^2) + 
                 # trait effects on intercept
-                MedSeedWTmg + 
+                MedSeedSize + 
               #  medSLA + 
              #   StemDens + Maxht + 
                 # trait effects on environemntal responses
-                MedSeedWTmg:Rockiness + MedSeedWTmg:topowet + MedSeedWTmg:PPTann + 
+                MedSeedSize:Rockiness + MedSeedSize:topowet + MedSeedSize:PPTann + 
               #  medSLA:Rockiness + medSLA:topowet + medSLA:PPTann + 
               #  StemDens:Rockiness + StemDens:topowet + StemDens:PPTann + 
                # Maxht:Rockiness + Maxht:topowet + Maxht:PPTann +
@@ -289,10 +322,10 @@ M2 =  glmmTMB(occur ~ 1 +   Rockiness + topowet +  PPTann + #linear env
                 #unimodal quadratic env
                 I(Rockiness^2) + I(topowet^2) + I(PPTann^2) + 
                 # trait effects on intercept
-                #MedSeedWTmg + 
+                #MedSeedSize + 
                 medSLA + #StemDens + Maxht + 
                 # trait effects on environemntal responses
-                #MedSeedWTmg:Rockiness + MedSeedWTmg:topowet + MedSeedWTmg:PPTann + 
+                #MedSeedSize:Rockiness + MedSeedSize:topowet + MedSeedSize:PPTann + 
                 medSLA:Rockiness + medSLA:topowet + medSLA:PPTann + 
                 #StemDens:Rockiness + StemDens:topowet + StemDens:PPTann + 
                 #Maxht:Rockiness + Maxht:topowet + Maxht:PPTann +
@@ -317,11 +350,11 @@ M3 =  glmmTMB(occur ~ 1 +   Rockiness + topowet +  PPTann + #linear env
                 #unimodal quadratic env
                 I(Rockiness^2) + I(topowet^2) + I(PPTann^2) + 
                 # trait effects on intercept
-               #MedSeedWTmg + 
+               #MedSeedSize + 
               #  medSLA + 
                 StemDens +  #Maxht + 
                 # trait effects on environemntal responses
-               # MedSeedWTmg:Rockiness + MedSeedWTmg:topowet + MedSeedWTmg:PPTann + 
+               # MedSeedSize:Rockiness + MedSeedSize:topowet + MedSeedSize:PPTann + 
               #  medSLA:Rockiness + medSLA:topowet + medSLA:PPTann + 
                 StemDens:Rockiness + StemDens:topowet + StemDens:PPTann + 
                # Maxht:Rockiness + Maxht:topowet + Maxht:PPTann +
@@ -346,12 +379,12 @@ M4 =  glmmTMB(occur ~ 1 +   Rockiness + topowet +  PPTann + #linear env
                 #unimodal quadratic env
                 I(Rockiness^2) + I(topowet^2) + I(PPTann^2) + 
                 # trait effects on intercept
-               #MedSeedWTmg + 
+               #MedSeedSize + 
               #  medSLA + 
               #  StemDens +  
                 Maxht + 
                 # trait effects on environemntal responses
-               # MedSeedWTmg:Rockiness + MedSeedWTmg:topowet + MedSeedWTmg:PPTann + 
+               # MedSeedSize:Rockiness + MedSeedSize:topowet + MedSeedSize:PPTann + 
               #  medSLA:Rockiness + medSLA:topowet + medSLA:PPTann + 
                # StemDens:Rockiness + StemDens:topowet + StemDens:PPTann + 
                 Maxht:Rockiness + Maxht:topowet + Maxht:PPTann +
@@ -368,7 +401,7 @@ end_time - start_time
 summary(M4)
 ```
 
-So a couple fo things emerge. Each trait has a significant interaction with at least one environmental covaariate. Meaning they traits could expalin some of between species variation in those environmental responses. But mostly they explain variation in response to rockiness.
+So a couple fo things emerge. Each trait has a significant interaction with at least one environmental covariate. Meaning they traits could explain some of between species variation in those environmental responses. But mostly they explain variation in response to rockiness.
 
 ## 3. Performance measures
 
@@ -388,7 +421,7 @@ rownames(mod.perf) <- c("M0", "M0.1", "M0.2", "M1", "M2", "M3", "M4")
 mod.perf
 ```
 
-The first 3 are information criteria, that penalise fit by the model dimension (estimated slightly differently). Lack of FIt is measured by the logarithmic-loss, or by the RMSE and the score statistics.
+The first 3 columns are information criteria, that penalise fit by the model dimension (estimated slightly differently). Lack of FIt is measured by the logarithmic-loss, or by the RMSE and the score statistics.
 
 The two R-squared metrics are useful measures of fit generalised to GLMM. The R2_conditional is explained variance with Random Effects. It is conditioned upon the level of of the species random effects. So, knowing what the species is. R2_marginal reports how much the fixed effects explain. Changes here are meaningful to use in a trait-base context because they reflect the contribution of Trait effects (over and no-traits model).
 
@@ -473,12 +506,12 @@ M5 =  glmmTMB(occur ~ 1 +   Rockiness + topowet +  PPTann + #linear env
                 #unimodal quadratic env
                 I(Rockiness^2) + I(topowet^2) + I(PPTann^2) + 
                 # trait effects on intercept
-               #MedSeedWTmg + 
+               #MedSeedSize + 
                 medSLA + 
               #  StemDens +  
                 Maxht + 
                 # trait effects on environemntal responses
-               # MedSeedWTmg:Rockiness + MedSeedWTmg:topowet + MedSeedWTmg:PPTann + 
+               # MedSeedSize:Rockiness + MedSeedSize:topowet + MedSeedSize:PPTann + 
                 medSLA:Rockiness + medSLA:topowet + medSLA:PPTann + 
                # StemDens:Rockiness + StemDens:topowet + StemDens:PPTann + 
                 Maxht:Rockiness + Maxht:topowet + Maxht:PPTann +
@@ -772,21 +805,33 @@ plot_multi <-
 plot_multi
 ```
 
-Other things optimum in 2 dimensions.
-
-schematic.
-
 ### Useful literature
 
 Pollock, L. J., Morris, W. K., & Vesk, P. A. (2012). The role of functional traits in species distributions revealed through a hierarchical model. *Ecography*, *35*(8), 716-725.
 
+*the paper that started this for us. Though earlier precedents can be found.*
+
 Jamil, T., Ozinga, W. A., Kleyer, M., & ter Braak, C. J. (2013). Selecting traits that explain species–environment relationships: a generalized linear mixed model approach. *Journal of Vegetation Science*, *24*(6), 988-1000.
+
+*convergent solution, took a more statistical approach. ter Braak's work shows the deep connection to direct gradient analysis as implemented in canonical correspondence analysis.*
 
 Miller, J. E., Damschen, E. I., & Ives, A. R. (2019). Functional traits and community composition: A comparison among community‐weighted means, weighted correlations, and multilevel models. *Methods in Ecology and Evolution*, *10*(3), 415-425.
 
+*this work took a deep dive into the performance of trait_SDM and the comparison to community weighted means. SHowed that CWM are prone to type 1 errors in estimating trait-environment associations.*
+
 ter Braak, C. J. (2019). New robust weighted averaging‐and model‐based methods for assessing trait–environment relationships. *Methods in Ecology and Evolution*, *10*(11), 1962-1971.
 
+*ter Braak pays close attention to the reliability of trait-SDM methods and use of appropriate null hypothesis testing. includes a tutorial. again compares to community weighted means*
+
 Vesk, P. A., Morris, W. K., Neal, W. C., Mokany, K., & Pollock, L. J. (2021). Transferability of trait‐based species distribution models. *Ecography*, *44*(1), 134-147.
+
+*we demonstrated how to evaluate the performance of models fitted in one region to new species and new regions*
+
+Bates, Douglas, Reinhold Kliegl, Shravan Vasishth, and Harald Baayen. "Parsimonious mixed models." *arXiv preprint arXiv:1506.04967* (2015).
+
+Matuschek, H., Kliegl, R., Vasishth, S., Baayen, H., & Bates, D. (2017). Balancing Type I error and power in linear mixed models. *Journal of memory and language*, *94*, 305-315.
+
+*These two papers argue for simple parsimonious model structures, with particular regard to random effect structures.*
 
 ```{r}
 
