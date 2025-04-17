@@ -1,0 +1,797 @@
+---
+title: "trait-SDM_tutorial"
+---
+
+# Trait-SDM: correlative modelling of multispecies occurrences with traits.
+
+This vignette introduces trait-Species Distribution Modelling. This is an approach to correlative modelling of multi-species datasets of occurrence (usually presence-absence in plots). But in theory the methods can be applied to abundances in plots or to presence-only data via appropriate likelihoods. in these models the species trait is a predictor, that you use to try to explain and predict distributions. This contrasts with the approach of treating the trait as a response to be modeled at a community level, AKA Community Weighted Means.
+
+We use multilevel models or hierarchical models or mixed effects models. The term multi-level model captures the conceptual approach that the species have linear models of response to environment. The parameters of those environmental response models which are modelled at a second, higher level, through species traits and extra variation.
+
+The document is sets out as rough guide to a workflow.
+
+1.  Prepare data from species traits and species occurrence datasets.
+
+2.  Fit models and select model structures.
+
+3.  Explore performance measures.
+
+4.  Plotting model outputs.
+
+NB iterating over 2 & 3 is common.
+
+## 1. Load packages and data
+
+lots needed for different stages
+
+```{r}
+library(corrplot, quietly = TRUE, warn.conflicts = FALSE)
+library(DHARMa, quietly = TRUE, warn.conflicts = FALSE)
+library(dplyr, quietly = TRUE, warn.conflicts = FALSE)
+library(ggfortify, quietly = TRUE, warn.conflicts = FALSE)
+library(ggplot2, quietly = TRUE, warn.conflicts = FALSE)
+library(GGally, quietly = TRUE, warn.conflicts = FALSE)
+library(glmmTMB, quietly = TRUE, warn.conflicts = FALSE)
+library(performance, quietly = TRUE, warn.conflicts = FALSE)
+#library(patchwork, quietly = TRUE, warn.conflicts = FALSE)
+library(scales, quietly = TRUE, warn.conflicts = FALSE)
+library(sjPlot, quietly = TRUE, warn.conflicts = FALSE)
+library(stats, quietly = TRUE, warn.conflicts = FALSE)
+library(tidyr, quietly = TRUE, warn.conflicts = FALSE)
+
+```
+
+### Trait data
+
+Here we use Laura Pollock's PhD data on Eucalyptus trees in Gariwerd-Grampians. cite P
+
+```{r}
+library(readr)
+traits <- read_csv("grampians_traits.csv")
+View(traits)
+```
+
+### Occurrence data.
+
+These are presence-absence in plots centred on a tree. (so all plots have at least 1 tree)
+
+```{r}
+occ <- read_csv("grampians_plots.csv")
+head(occ)
+```
+
+Exploratory Data Analysis: correlations, transform the data where needed
+
+### Environmental correlations
+
+Let use a subset of environmental covariates. So use a correlation matrix plot, ordered by hierarchical clustering.
+
+```{r}
+env_cor <- stats::cor(occ[ ,c(3:26,29:33)])
+corrplot::corrplot(env_cor, method = "ellipse", order = 'hclust')
+```
+
+I want Northness, PPTann, rockiness, topowet.
+
+Respectively these reflect local irradiance, exploitable soil volume, local shedding/receiving of soil moisture, annual rainfall. Plus the occurrences
+
+```{r}
+occ %>%
+select(PLOTID, IDENT,  Northness, Rockiness, topowet, PPTann,  ALA, ARE, ARO, BAX, CAM, GON, LEU, MEL, OBL, OVA, PAU, RAD, RUB, SAB, SER, VER, VIC, VIMcyg, VIMvim, WIL ) -> occ.select
+```
+
+```{r}
+ggpairs(occ.select, columns = 3:7) 
+```
+
+the environmental covariates are not correlated, but could be transformed. I won't do this in this exercise, but would consider log-transforms of PPT and topowet, Quasi-logit for Rockiness.
+
+and then pivot longer ready to merge with trait data.
+
+```{r}
+occ.l <- pivot_longer(occ.select, cols = 7:26, values_to = "occur")
+names(occ.l)[7] <- "TAXON"
+```
+
+### Trait correlations
+
+```{r}
+ggpairs(traits, columns = 2:8) 
+```
+
+ok we might want to transform some e.g. medFtWt, etc.
+
+```{r}
+traits_cor <- stats::cor(traits[-1])
+corrplot::corrplot(traits_cor, method = "ellipse", order = 'hclust')
+```
+
+Select a subset of traits that capture functions and are not too collinear.
+
+```{r}
+traits %>%
+  select(TAXON, MedSeedWTmg, medSLA, StemDens, Maxht) -> traits.sel
+ggpairs(traits.sel, columns = 2:5) 
+```
+
+ok so SLA is most correlated with others.
+
+Scale the quantitative covariates. This helps fitting, but also makes the effects of all the variables comparable.
+
+```{r}
+occ.l$PLOTID <-as.character(occ.l$PLOTID)
+occ.l$occur <-as.character(occ.l$occur)
+occ.l %>%
+   mutate(across(where(is.numeric), scale)) -> occ.l.scaled
+occ.l.scaled$occur <-as.numeric(occ.l.scaled$occur)
+traits.sel %>%
+   mutate(across(where(is.numeric), scale)) -> traits.sel.scaled
+```
+
+now merge
+
+```{r}
+trait_occ.l.scaled <- 
+  left_join(occ.l.scaled, traits.sel.scaled, by = "TAXON")
+
+#catch a couple of occurrences =2
+trait_occ.l.scaled <- mutate(trait_occ.l.scaled, occur = case_when(occur > 1 ~ 1, TRUE ~ occur))
+head(trait_occ.l.scaled)
+```
+
+OK, we should be ready.
+
+## 2. Fit models
+
+### No trait models
+
+in glmm.TMB, which is fast, and handles complex random effect structures btter than lmer. but
+
+#### M0 No Trait model, 4 envs, varying slopes
+
+note, here is
+
+```{r}
+start_time <- Sys.time()
+M0 =  glmmTMB(occur ~ 1 + Northness +  Rockiness + topowet +  PPTann + 
+                (1 + Northness +  Rockiness + topowet +  PPTann  || TAXON) #varying slopes & intercpt
+              , 
+                family=binomial, data=trait_occ.l.scaled
+                ) 
+end_time <- Sys.time()
+end_time - start_time
+```
+
+Here just to demonstrate speed.
+
+```{r}
+start_time <- Sys.time()
+M0 =  lme4::glmer(occur ~ 1 + Northness +  Rockiness + topowet +  PPTann + 
+                (1 + Northness +  Rockiness + topowet +  PPTann  || TAXON) #varying slopes & intercpt
+              , 
+                family=binomial, data=trait_occ.l.scaled
+                ) 
+end_time <- Sys.time()
+end_time - start_time
+```
+
+```{r}
+summary(M0)
+#performance::model_performance(M0)
+```
+
+note very little variation among species in Northness response. so let's drop it
+
+```{r}
+start_time <- Sys.time()
+M0 =  glmmTMB(occur ~ 1  +  Rockiness + topowet +  PPTann + 
+                (1 +  Rockiness + topowet +  PPTann  | TAXON) #varying slopes & intercpt
+                , 
+                family=binomial, data=trait_occ.l.scaled
+                ) 
+
+end_time <- Sys.time()
+end_time - start_time
+```
+
+#### M0.1 No Trait model, 3 envs uncorrelated varying slopes
+
+```{r}
+start_time <- Sys.time()
+M0.1 =  glmmTMB(occur ~ 1 +   Rockiness + topowet +  PPTann + 
+                (1 +   Rockiness + topowet +  PPTann  || TAXON)
+                , 
+                family=binomial, data=trait_occ.l.scaled
+                ) 
+end_time <- Sys.time()
+end_time - start_time
+```
+
+```{r}
+summary(M0.1)
+```
+
+So, uncorrelated RES improve BIC but worsen the AIC and the deviance. AIC favours more complex models, compared to BIC. I favour uncorrelated slopes. These are 3rd order parameters, we have no hypotheses for them (nor ways to understand them), they reduce power. Doug Bates has a couple of papers presenting this case.
+
+#### M0.2 No traits, quadratics environment, fixed width, correl RE
+
+```{r}
+start_time <- Sys.time()
+
+M0.2 =  glmmTMB(occur ~ 1 +   Rockiness + topowet +  PPTann + 
+                   I(Rockiness^2) + I(topowet^2) + I(PPTann^2) +
+                (1 +  Rockiness + topowet +  PPTann  || TAXON)
+                , 
+                family=binomial, data=trait_occ.l.scaled
+                ) 
+
+end_time <- Sys.time()
+end_time - start_time
+```
+
+```{r}
+summary(M0.2)
+```
+
+Tells us we need quadratic terms for Rockiness, topowetness, PPTann. Why? significant terms, and the between species SD for the linear effects of environement have increased, meaning there is more for the traits to explain.
+
+a quick check of residuals using the DHARMa package
+
+```{r}
+simuloutput_0.1 <- simulateResiduals(M0.1)
+plot(simuloutput_0.1)
+testQuantiles(M0.1)
+simuloutput_0.2 <- simulateResiduals(M0.2)
+plot(simuloutput_0.2)
+testQuantiles(M0.2)
+```
+
+A nice qq-plot and even distribution of residuals. OK the test can detect some small deviations in the distribution of the residuals. but really, that distribution is as nice as you'll see. IMHO.
+
+Ok, if we are happy we have our model structure for the environmental responses, we can now proceed to fitting trait-SDM, with trait\*environment interactions.
+
+### Single trait models
+
+#### M1 Seed mass
+
+```{r}
+start_time <- Sys.time()
+M1 =  glmmTMB(occur ~ 1 +   Rockiness + topowet +  PPTann + #linear env 
+                #unimodal quadratic env
+                I(Rockiness^2) + I(topowet^2) + I(PPTann^2) + 
+                # trait effects on intercept
+                MedSeedWTmg + 
+              #  medSLA + 
+             #   StemDens + Maxht + 
+                # trait effects on environemntal responses
+                MedSeedWTmg:Rockiness + MedSeedWTmg:topowet + MedSeedWTmg:PPTann + 
+              #  medSLA:Rockiness + medSLA:topowet + medSLA:PPTann + 
+              #  StemDens:Rockiness + StemDens:topowet + StemDens:PPTann + 
+               # Maxht:Rockiness + Maxht:topowet + Maxht:PPTann +
+                (1 +   Rockiness + topowet +  PPTann  || TAXON)
+                , 
+                family=binomial, data=trait_occ.l.scaled
+                ) 
+
+end_time <- Sys.time()
+end_time - start_time
+```
+
+```{r}
+summary(M1)
+```
+
+#### M2 SLA
+
+```{r}
+start_time <- Sys.time()
+M2 =  glmmTMB(occur ~ 1 +   Rockiness + topowet +  PPTann + #linear env 
+                #unimodal quadratic env
+                I(Rockiness^2) + I(topowet^2) + I(PPTann^2) + 
+                # trait effects on intercept
+                #MedSeedWTmg + 
+                medSLA + #StemDens + Maxht + 
+                # trait effects on environemntal responses
+                #MedSeedWTmg:Rockiness + MedSeedWTmg:topowet + MedSeedWTmg:PPTann + 
+                medSLA:Rockiness + medSLA:topowet + medSLA:PPTann + 
+                #StemDens:Rockiness + StemDens:topowet + StemDens:PPTann + 
+                #Maxht:Rockiness + Maxht:topowet + Maxht:PPTann +
+                (1 +   Rockiness + topowet +  PPTann  || TAXON)
+                , 
+                family=binomial, data=trait_occ.l.scaled
+                ) 
+
+end_time <- Sys.time()
+end_time - start_time
+```
+
+```{r}
+summary(M2)
+```
+
+#### M3 Stem Density
+
+```{r}
+start_time <- Sys.time()
+M3 =  glmmTMB(occur ~ 1 +   Rockiness + topowet +  PPTann + #linear env 
+                #unimodal quadratic env
+                I(Rockiness^2) + I(topowet^2) + I(PPTann^2) + 
+                # trait effects on intercept
+               #MedSeedWTmg + 
+              #  medSLA + 
+                StemDens +  #Maxht + 
+                # trait effects on environemntal responses
+               # MedSeedWTmg:Rockiness + MedSeedWTmg:topowet + MedSeedWTmg:PPTann + 
+              #  medSLA:Rockiness + medSLA:topowet + medSLA:PPTann + 
+                StemDens:Rockiness + StemDens:topowet + StemDens:PPTann + 
+               # Maxht:Rockiness + Maxht:topowet + Maxht:PPTann +
+                (1 +   Rockiness + topowet +  PPTann  || TAXON)
+                , 
+                family=binomial, data=trait_occ.l.scaled
+                ) 
+
+end_time <- Sys.time()
+end_time - start_time
+```
+
+```{r}
+summary(M3)
+```
+
+#### M4 Max Height
+
+```{r}
+start_time <- Sys.time()
+M4 =  glmmTMB(occur ~ 1 +   Rockiness + topowet +  PPTann + #linear env 
+                #unimodal quadratic env
+                I(Rockiness^2) + I(topowet^2) + I(PPTann^2) + 
+                # trait effects on intercept
+               #MedSeedWTmg + 
+              #  medSLA + 
+              #  StemDens +  
+                Maxht + 
+                # trait effects on environemntal responses
+               # MedSeedWTmg:Rockiness + MedSeedWTmg:topowet + MedSeedWTmg:PPTann + 
+              #  medSLA:Rockiness + medSLA:topowet + medSLA:PPTann + 
+               # StemDens:Rockiness + StemDens:topowet + StemDens:PPTann + 
+                Maxht:Rockiness + Maxht:topowet + Maxht:PPTann +
+                (1 + Rockiness + topowet + PPTann || TAXON)
+                , 
+                family=binomial, data=trait_occ.l.scaled
+                ) 
+
+end_time <- Sys.time()
+end_time - start_time
+```
+
+```{r}
+summary(M4)
+```
+
+So a couple fo things emerge. Each trait has a significant interaction with at least one environmental covaariate. Meaning they traits could expalin some of between species variation in those environmental responses. But mostly they explain variation in response to rockiness.
+
+## 3. Performance measures
+
+Earlier I briefly mentioned AIC and BIC in choosing an appropriate no-traits model. But there is much more to the evaluation of trait-SDM. Here is just sketch of how I think about this. first point to note is that as these ar multi-level models, there are multiple levels at which to measure fit. At the lower level, its the fit of the predicted occurrence to the observed occurrences. At the higher level, between species parameters. This higher level is not so obviously or routinely evaluated, but is crucial to the question of how do traits influence species occurrence (or other measure of performance/response) along environmental gradients.
+
+First, lets use the performance package by Daniel Lüdecke
+
+```{r}
+rbind(performance::model_performance(M0),
+      performance::model_performance(M0.1),
+      performance::model_performance(M0.2),
+performance::model_performance(M1),
+performance::model_performance(M2),
+performance::model_performance(M3),
+performance::model_performance(M4)) -> mod.perf
+rownames(mod.perf) <- c("M0", "M0.1", "M0.2", "M1", "M2", "M3", "M4")
+mod.perf
+```
+
+The first 3 are information criteria, that penalise fit by the model dimension (estimated slightly differently). Lack of FIt is measured by the logarithmic-loss, or by the RMSE and the score statistics.
+
+The two R-squared metrics are useful measures of fit generalised to GLMM. The R2_conditional is explained variance with Random Effects. It is conditioned upon the level of of the species random effects. So, knowing what the species is. R2_marginal reports how much the fixed effects explain. Changes here are meaningful to use in a trait-base context because they reflect the contribution of Trait effects (over and no-traits model).
+
+Notice how AIC indicates M2 is an improvement over M0, yet no model with traits improves BIC over the no traits model. BIC favours simple models (relative to AIC).
+
+The Intra-class Correlation Coefficient (ICC) is greatest for the no traits model, as the species level RE contributes greatly to the fit. ICC is reduced most by M2, SLA. from 0.73 to 0.65
+
+We can ignore AICc (small sample), Score-Log, Sigma
+
+```{r}
+ggplot(mod.perf) +
+  aes(R2_marginal, ICC) +
+  geom_point() +
+  geom_text(
+    label = rownames(mod.perf),
+    nudge_y = 0.01,
+    check_overlap = T
+  )
+```
+
+Shows M2 has the greatest marginal R-squared. it has reduced the ICC the most. Overall there is s strong negative correlation between these measures, but not perfect.
+
+### Between-species variation in model terms, explanation by traits.
+
+can we extract the RE terms?
+
+```{r}
+M0.2$fit$par
+M0.2$sdr$par.fixed
+M0.2$sdr$par.fixed[8:11]
+exp(M0.2$sdr$par.fixed[8:11]) #SD of the REs intercept and 3 envs
+M1$sdr$par.fixed
+```
+
+now extract these for each of the 5 fitted models?
+
+```{r}
+rbind(exp(M0.2$sdr$par.fixed[8:11]), #SD of the REs intercept and 3 envs
+exp(M1$sdr$par.fixed[12:15]) ,
+exp(M2$sdr$par.fixed[12:15]) ,
+exp(M3$sdr$par.fixed[12:15]) ,
+exp(M4$sdr$par.fixed[12:15]) ) -> spp_sigma
+colnames(spp_sigma) <- c("int", "rock", "twi", "ppt")
+spp_sigma <- as.data.frame(spp_sigma)
+spp_sigma$model <- c("M0.2", "M1", "M2", "M3", "M4")
+spp_sigma
+```
+
+We now look at how the traits explain the between species variance in model parameters for environmental responses.
+
+```{r}
+#library(GGally)
+spp_sigma %>%
+  ggparcoord(
+    columns = 1:4, groupColumn = "model", scale = "globalminmax",     showPoints = TRUE,
+    title = "Between-species sigma with 3 single trait models & M0.3", 
+    order = c(1,2,4,3)
+    ) +
+      ylim(0,2) + 
+  labs(x = "model parameter", y = "standard deviation among species")
+  
+# this next one emphasises the varition within model terms
+spp_sigma %>%
+  ggparcoord(
+    columns = 1:4, groupColumn = "model", scale = "uniminmax",     showPoints = TRUE,
+    title = "Rescaled Between-species sigma with 3 single trait models & M0.2", 
+    order = c(1,2,4,3)
+    ) +
+      ylim(0,1)
+
+```
+
+First figure illustrates explanation illustrates how relative to the no traits model (M0.3), the intercept is best explained by Max Ht in M4, SLA (M2 best explains variation in responses to rockiness and PPT,
+
+You could calculate the reduction as a quasi R\^2 of between species variation. While approximate, this is a pretty central quantity for us.
+
+These plots indicate our best single trait model would likely be M2 (SLA). it explains \~60% of between species variation in response to rockiness. But Height explains prevalence. and seed mass topographic wetness. NB there least variation in Topowet (sd =.56) and seed mass explains \<10% of it.
+
+```{r}
+start_time <- Sys.time()
+M5 =  glmmTMB(occur ~ 1 +   Rockiness + topowet +  PPTann + #linear env 
+                #unimodal quadratic env
+                I(Rockiness^2) + I(topowet^2) + I(PPTann^2) + 
+                # trait effects on intercept
+               #MedSeedWTmg + 
+                medSLA + 
+              #  StemDens +  
+                Maxht + 
+                # trait effects on environemntal responses
+               # MedSeedWTmg:Rockiness + MedSeedWTmg:topowet + MedSeedWTmg:PPTann + 
+                medSLA:Rockiness + medSLA:topowet + medSLA:PPTann + 
+               # StemDens:Rockiness + StemDens:topowet + StemDens:PPTann + 
+                Maxht:Rockiness + Maxht:topowet + Maxht:PPTann +
+                (1 + Rockiness + topowet + PPTann || TAXON)
+                , 
+                family=binomial, data=trait_occ.l.scaled
+                ) 
+
+end_time <- Sys.time()
+end_time - start_time
+summary(M5)
+```
+
+## 4. Plotting from models
+
+the sjplot package from Daniel Lüdecke is really helpful.
+
+### Coefficient plots
+
+```{r}
+plot_model(
+  M0.2,
+  transform = NULL,
+  show.values = TRUE,
+  value.offset = .4,
+  title = "M0.2 common effects",
+  dot.size = 3, 
+#  order.terms = c(1,2,5,3,4)
+) + geom_vline(aes(xintercept = 3.6), colour = "grey50") 
+```
+
+#### M2
+
+```{r}
+plot_model(
+  M2,
+  transform = NULL,
+  show.values = FALSE,
+  p.shape = TRUE,
+  title = "M2 SLA",
+  dot.size = 3,
+  rm.terms = c(
+ #   "MAT", "WD", "MAT:WD", "pH", "DoS", "SLA", "SM", "MH", "SD", "RBT", "LA"
+  )
+)+ geom_vline(aes(xintercept = 3.6), colour = "grey50") 
+```
+
+### Marginal effects plot
+
+first linear response from no traits model
+
+```{r}
+sjPlot::plot_model(M0, type = "pred", terms = c("Rockiness [all]"), mdrt.values = "meansd",
+                               title = "") 
+```
+
+next, predicted responses to an environmental gradient for 3 different trait (SLA) levels. this can be done with sjplot plot_model.
+
+```{r}
+ sjPlot::plot_model(M2, type = "pred", terms = c("Rockiness [all]", "medSLA"), mdrt.values = "meansd",
+                               title = "")
+```
+
+this can be done with sjplot plot models.
+
+Alternatively here is some code that generates predictions more manually (from Will Morris).
+
+```{r}
+plot_data <- with(
+  occ.l.scaled,
+  expand.grid(
+    intercept = 1,
+    Rockiness = seq(min(Rockiness), max(Rockiness), length.out = 100),
+    medSLA = c(-2, 0, 2)
+  )
+)
+
+sim_data <- with(
+  getElement(summary(M2), "coefficients"),
+  outer(
+    plot_data[["intercept"]],
+    rnorm(
+      1000,
+      cond["(Intercept)", "Estimate"],
+      cond["(Intercept)", "Std. Error"]
+    )
+  ) +
+  outer(
+    plot_data[["Rockiness"]],
+    rnorm(
+      1000,
+      cond["Rockiness", "Estimate"],
+      cond["Rockiness", "Std. Error"]
+    )
+  ) +
+  outer(
+    plot_data[["medSLA"]],
+    rnorm(
+      1000,
+      cond["medSLA", "Estimate"],
+      cond["medSLA", "Std. Error"]
+    )
+  ) +
+  outer(
+    plot_data[["Rockiness"]] * plot_data[["medSLA"]],
+    rnorm(
+      1000,
+      cond["Rockiness:medSLA", "Estimate"],
+      cond["Rockiness:medSLA", "Std. Error"]
+    )
+  ) +
+  outer(
+    (plot_data[["Rockiness"]])^2,
+    rnorm(
+      1000,
+      cond["I(Rockiness^2)", "Estimate"],
+      cond["I(Rockiness^2)", "Std. Error"]
+    )
+  ) 
+)
+
+plot_data <- transform(
+  plot_data,
+  mean = plogis(rowMeans(sim_data)),
+  lo90 = plogis(apply(sim_data, 1L, quantile, 0.025)),
+  up90 = plogis(apply(sim_data, 1L, quantile, 0.95))
+)
+
+slaRock <-
+  ggplot(plot_data) +
+  aes(
+    Rockiness,
+    mean,
+   ymin = lo90,
+    ymax = up90,
+    col = factor(medSLA, levels = c(2, 0, -2)),
+    fill = factor(medSLA, levels = c(2, 0, -2))
+  ) +
+  geom_line() +
+  geom_ribbon(alpha = 0.1) +
+  scale_y_sqrt(breaks=waiver(), limits = c(0, 1.0)) +  
+  facet_grid(
+    "medSLA",
+    labeller = labeller(
+      medSLA = c(
+        "-2" = "SLA 21.8 g/cm2", "0" = "SLA 43.6 g/cm2", "2" = "SLA 65.4 g/cm2"
+      ) #chosen from the scale attributes mn +/- 2sd
+    ),
+  ) +
+  theme(legend.position = "none") +
+  labs(
+    title = "(a) Effect of SLA range, 90% CI",
+    y = "Probability of occupancy (square root scaled)",
+    color = "medSLA",
+    fill = "medSLA"
+  ) + 
+  scale_x_continuous(
+    breaks = c(-0.5, 0, 1,  2),
+    labels = c("6", "24", "59", "95" ) #chosen from the scale attributes mn +/- x.sd
+  )
+
+#rm(plot_data, sim_data)
+slaRock
+```
+
+#### marginal effects on 2 environments
+
+here for 2 dimensions
+
+```{r}
+plot_data <- with(
+  occ.l.scaled,
+  expand.grid(
+    intercept = 1,
+    Rockiness = seq(min(Rockiness), max(Rockiness), length.out = 100),
+    PPTann = c(-2, 0, 2),
+    medSLA = c(-2, 0, 2)
+  )
+)
+
+sim_data <- with(
+  getElement(summary(M2), "coefficients"),
+  outer(
+    plot_data[["intercept"]],
+    rnorm(
+      1000,
+      cond["(Intercept)", "Estimate"],
+      cond["(Intercept)", "Std. Error"]
+    )
+  ) +
+  outer(
+    plot_data[["Rockiness"]],
+    rnorm(
+      1000,
+      cond["Rockiness", "Estimate"],
+      cond["Rockiness", "Std. Error"]
+    )
+  ) +
+  outer(
+    plot_data[["PPTann"]],
+    rnorm(
+      1000,
+      cond["PPTann", "Estimate"],
+      cond["PPTann", "Std. Error"]
+    )
+  ) +
+  outer(
+    plot_data[["medSLA"]],
+    rnorm(
+      1000,
+      cond["medSLA", "Estimate"],
+      cond["medSLA", "Std. Error"]
+    )
+  ) +
+  outer(
+    plot_data[["Rockiness"]] * plot_data[["medSLA"]],
+    rnorm(
+      1000,
+      cond["Rockiness:medSLA", "Estimate"],
+      cond["Rockiness:medSLA", "Std. Error"]
+    )
+  ) +
+  outer(
+    plot_data[["PPTann"]] * plot_data[["medSLA"]],
+    rnorm(
+      1000,
+      cond["PPTann:medSLA", "Estimate"],
+      cond["PPTann:medSLA", "Std. Error"]
+    )
+  ) +
+  outer(
+    (plot_data[["Rockiness"]])^2,
+    rnorm(
+      1000,
+      cond["I(Rockiness^2)", "Estimate"],
+      cond["I(Rockiness^2)", "Std. Error"]
+    )
+  ) +
+  outer(
+    (plot_data[["PPTann"]])^2,
+    rnorm(
+      1000,
+      cond["I(PPTann^2)", "Estimate"],
+      cond["I(PPTann^2)", "Std. Error"]
+    )
+  )
+)
+
+plot_data <- transform(
+  plot_data,
+  mean = plogis(rowMeans(sim_data)),
+  lo90 = plogis(apply(sim_data, 1L, quantile, 0.05)),
+  up90 = plogis(apply(sim_data, 1L, quantile, 0.95))
+)
+
+plot_multi <-
+  ggplot(plot_data) +
+  aes(
+    Rockiness,
+    mean,
+   ymin = lo90,
+    ymax = up90,
+    col = factor(medSLA, levels = c(2, 0, -2)),
+    fill = factor(medSLA, levels = c(2, 0, -2)),
+  ) +
+  geom_line() +
+  geom_ribbon(alpha = 0.1) +
+  scale_y_sqrt(breaks = waiver()) +
+  facet_grid(
+    medSLA ~ PPTann,
+    labeller = labeller(
+      medSLA = c("-2" = "SLA 22 mm2/mg", "0" = "SLA 44 mm2/mg", "2" = "SLA 65 mm2/mg"),
+      PPTann = c("-2" = "PPTann 532 mm", "0" = "PPTann 786 mm", "2" = "PPTann 1040 mm"),
+      Rockiness = c("-2" = "Rockiness ", "0" = "Rockiness 24%", "2" = "Rockiness 94%")
+    )
+  ) +
+  theme(legend.position = "none") +
+  labs(
+    title = "Specific Leaf Area effect on response to MAT and WD",
+    y = "Probability of occupancy (square root scaled)",
+    x = "Rockiness (%)",
+    color = "medSLA",
+    fill = "medSLA",
+  ) + 
+  scale_x_continuous(
+    breaks = c(-0.5, 0, 1, 2), 
+    labels = c("6", "24", "59", "94")
+  ) 
+
+#rm(plot_data, sim_data)
+plot_multi
+```
+
+Other things optimum in 2 dimensions.
+
+schematic.
+
+### Useful literature
+
+Pollock, L. J., Morris, W. K., & Vesk, P. A. (2012). The role of functional traits in species distributions revealed through a hierarchical model. *Ecography*, *35*(8), 716-725.
+
+Jamil, T., Ozinga, W. A., Kleyer, M., & ter Braak, C. J. (2013). Selecting traits that explain species–environment relationships: a generalized linear mixed model approach. *Journal of Vegetation Science*, *24*(6), 988-1000.
+
+Miller, J. E., Damschen, E. I., & Ives, A. R. (2019). Functional traits and community composition: A comparison among community‐weighted means, weighted correlations, and multilevel models. *Methods in Ecology and Evolution*, *10*(3), 415-425.
+
+ter Braak, C. J. (2019). New robust weighted averaging‐and model‐based methods for assessing trait–environment relationships. *Methods in Ecology and Evolution*, *10*(11), 1962-1971.
+
+Vesk, P. A., Morris, W. K., Neal, W. C., Mokany, K., & Pollock, L. J. (2021). Transferability of trait‐based species distribution models. *Ecography*, *44*(1), 134-147.
+
+```{r}
+
+```
+
+```{r}
+
+```
